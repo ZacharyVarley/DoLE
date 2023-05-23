@@ -30,6 +30,10 @@ plt.imsave('images/image2_norm.png', image2_norm.reshape(image2.size[::-1]), cma
 image1_tensor = torch.tensor(image1_norm).float()[None, None].to(device)
 image2_tensor = torch.tensor(image2_norm).float()[None, None].to(device)
 
+# use Kornia to run CLAHE
+image1_tensor = kornia.enhance.equalize_clahe(image1_tensor)
+image2_tensor = kornia.enhance.equalize_clahe(image2_tensor)
+
 # stack the images into a 2-batch, 1-channel, input tensor
 img_input = torch.concat([image1_tensor, image2_tensor], dim=0)
 
