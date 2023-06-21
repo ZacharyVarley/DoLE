@@ -4,15 +4,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from torch.fft import rfft2, fftshift, irfft2
-import kornia.geometry as kg
 import kornia
 from kornia.core import Tensor
 from kornia.core import concatenate
 from kornia.feature.laf import denormalize_laf, laf_is_inside_image, normalize_laf
+from ransac import RANSAC
 
 
 class EMIScalePyramid(nn.Module):
-
     def __init__(self, n_levels: int = 3, init_radius: float = 1.6, min_size: int = 15, radius_step: float = 1.6,
                  multiplicative: bool = False, bins: int = 8, mode: str = 'box'):
         super().__init__()
@@ -102,7 +101,7 @@ class EMIScalePyramid(nn.Module):
         # show_kornia(entropies[1, 0, pad:pad+A.shape[-2], pad:pad+A.shape[-1]], (512,512))
         return output
 
-    def box_est_entropy(self, A, ksizes):
+    def box_est_entropy(self, A, ksizes, uncounted_bin=0):
         B, C, H, W = A.size()
 
         pad = int(ksizes.max().item()) + 1
@@ -110,7 +109,8 @@ class EMIScalePyramid(nn.Module):
         level_sets = (A * self.bins).byte().repeat(1, self.bins, 1, 1) == torch.arange(self.bins, dtype=torch.uint8,
                                                                                        device=A.device)[None, :, None,
                                                                           None]
-        level_sets = torch.cat([torch.ones_like(A), level_sets], dim=1).float()
+        level_sets = torch.cat([~level_sets[:, [uncounted_bin]], level_sets[:, (1+uncounted_bin):]], dim=1).float()
+        # level_sets = torch.cat([torch.ones_like(A), level_sets[(1+uncounted_bin):]], dim=1).float()
 
         level_sets_padded = torch.nn.functional.pad(level_sets, (pad, pad, pad, pad), mode='constant', value=0.0)
 
@@ -397,9 +397,13 @@ def dole_match(images,
                n_levels=5,
                radius_start=5,
                radius_step=1.4,
+               mr_size=6.0,
                n_bins=20,
                mode='box',
-               n_features=10000
+               n_features=10000,
+               model_type='homography',
+               match_thresh_ratio=0.99,
+               match_thresh_sq_dist=15
                ):
     sift = kornia.feature.SIFTDescriptor(patch_size, ang_bins, spatial_bins, rootsift=True).to(images.device)
     # resp = K.feature.BlobHessian()
@@ -414,7 +418,7 @@ def dole_match(images,
                                 mode=mode)
     nms = kornia.geometry.ConvQuadInterp3d()
     detector = MIScaleSpaceDetector(n_features,
-                                    mr_size=6.0,
+                                    mr_size=mr_size,
                                     resp_module=resp,
                                     nms_module=nms,
                                     scale_pyr_module=scale_pyr,
@@ -432,14 +436,16 @@ def dole_match(images,
         descriptors = sift(patches.view(B * N, CH, H, W)).view(B, N, -1)
         # scores, matches = K.feature.match_snn(descriptors[0], descriptors[1], 0.9)
         # scores, matches = K.feature.match_mnn(descriptors[0], descriptors[1], 0.95)
-        match_dists, match_idxs = kornia.feature.match_fginn(descriptors[0], descriptors[1], lafs[[0]], lafs[[1]], 0.99, 10, mutual=True)
+        match_dists, match_idxs = kornia.feature.match_fginn(descriptors[0], descriptors[1], lafs[[0]], lafs[[1]], match_thresh_ratio, 10, mutual=True)
     src_pts = lafs[1, match_idxs[:, 1], :, 2]
     dst_pts = lafs[0, match_idxs[:, 0], :, 2]
 
-    ransac = kg.ransac.RANSAC(model_type='homography', inl_th=15.0, batch_size=10 * 4096, max_iter=100,
-                              confidence=0.999, max_lo_iters=20)
+    # use ransac to fit transformation
+    ransac = RANSAC(model_type=model_type, inl_th=match_thresh_sq_dist, batch_size=32768, max_iter=100,
+                              confidence=0.99999, max_lo_iters=20)
     homography, mask = ransac(src_pts, dst_pts, match_dists)
     mask = mask.cpu()
     inliers = match_idxs[mask.bool().squeeze(), :]
+
     return homography, inliers
 

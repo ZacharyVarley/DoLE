@@ -1,3 +1,6 @@
+# scratch area for code usage
+scratch/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
