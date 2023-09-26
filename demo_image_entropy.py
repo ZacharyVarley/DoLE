@@ -7,16 +7,25 @@ from mind import MINDPyramidPair
 from tqdm import tqdm
 from lie_homograph import LieGroupImageTransform
 
+print("Starting")
+
 # set the device for PyTorch
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+print("device: ", device)
+
 # load the images using PIL
 image1 = Image.open('images/Ti7_eCHORD_wd_10_tilt_3_rot_0.tif')
-image2 = Image.open('images/Ti7_eCHORD_wd_10_tilt_3_rot_10.tif')
+image2 = Image.open('images/gt.png')
+image2 = image2.convert('L')
 
 # convert to numpy arrays and check min/max values
 image1_np = np.array(image1)
-image2_np = np.array(image2)
+image2_np = np.array(image2)[50:-50, 100:-100]
+
+# save image 2 cropped so we can see it
+image2_pil = Image.fromarray(image2_np)
+image2_pil.save('images/image2_cropped.png')
 
 # normalize the images with the largest max value across both images
 image1_norm = image1_np / max([np.max(image1_np), np.max(image2_np)])
@@ -26,6 +35,10 @@ image2_norm = image2_np / max([np.max(image1_np), np.max(image2_np)])
 image1_tensor = torch.tensor(image1_norm).float()[None, None].to(device)
 image2_tensor = torch.tensor(image2_norm).float()[None, None].to(device)
 
+# resize both to the size of image 2 using kornia
+image1_tensor = kornia.geometry.resize(image1_tensor, (image2_tensor.shape[-2], image2_tensor.shape[-1]))
+image2_tensor = kornia.geometry.resize(image2_tensor, (image2_tensor.shape[-2], image2_tensor.shape[-1]))
+
 # use Kornia to run CLAHE
 image1_tensor_clahe = kornia.enhance.equalize_clahe(image1_tensor, clip_limit=4.0, grid_size=(4, 4))
 image2_tensor_clahe = kornia.enhance.equalize_clahe(image2_tensor, clip_limit=4.0, grid_size=(4, 4))
@@ -34,7 +47,7 @@ image2_tensor_clahe = kornia.enhance.equalize_clahe(image2_tensor, clip_limit=4.
 img_input_dole = torch.concat([image1_tensor_clahe, image2_tensor_clahe], dim=0)
 
 # run the DOLE algorithm to get the homography
-dole_homography, inliers = dole_match(img_input_dole)
+dole_homography, matching_data = dole_match(img_input_dole, match_thresh_ratio=0.999)
 
 # apply the homography to the second image using Kornia
 img2_warped_dole = kornia.geometry.warp_perspective(image2_tensor, dole_homography[None], dsize=image1_tensor.shape[-2:])

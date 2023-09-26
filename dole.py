@@ -390,24 +390,49 @@ class Identity(nn.Module):
         return input
 
 
-def dole_match(images,
-               patch_size=61,
-               ang_bins=16,
-               spatial_bins=20,
-               n_levels=5,
-               radius_start=5,
-               radius_step=1.4,
-               mr_size=6.0,
-               n_bins=20,
-               mode='box',
-               n_features=10000,
-               model_type='homography',
-               match_thresh_ratio=0.99,
-               match_thresh_sq_dist=15
+def dole_match(images: torch.Tensor,
+               patch_size: int = 61,
+               ang_bins: int = 16,
+               spatial_bins: int = 20,
+               n_levels: int = 5,
+               radius_start: float = 5.0,
+               radius_step: float = 1.4,
+               mr_size: float = 6.0,
+               n_intensity_bins: int = 20,
+               mode: str = 'fft',
+               n_features: int = 5000,
+               model_type: str = 'homography',
+               match_thresh_ratio: float = 0.99,
+               match_thresh_sq_dist: float = 20
                ):
+    """
+    DoLE matching algorithm
+
+    Args:
+        images: tensor of shape [2, C, H, W]
+        patch_size: size of the patch for descriptor extraction
+        ang_bins: number of bins for orientation histogram
+        spatial_bins: number of bins for spatial histogram
+        n_levels: number of levels in the scale space
+        radius_start: radius of the first level in the scale space
+        radius_step: multiplicative step for the radius
+        mr_size: multiplier for local feature scale compared to the detection scale
+        n_intensity_bins: number of bins for intensity histogram
+        mode: mode for scale space generation, one of ['box', 'fft']
+        n_features: number of features to detect
+        model_type: type of the model to fit, one of ['homography', 'affine']
+        match_thresh_ratio: threshold for the ratio test
+        match_thresh_sq_dist: threshold for the squared distance test
+
+    Returns:
+        homography: tensor of shape [3, 3]
+        src_pts: tensor of shape [N, 2]
+        dst_pts: tensor of shape [N, 2]
+        mask: tensor of shape [N]
+        inliers: tensor of shape [M, 2]
+        lafs: tensor of shape [2, N, 2, 3]
+    """
     sift = kornia.feature.SIFTDescriptor(patch_size, ang_bins, spatial_bins, rootsift=True).to(images.device)
-    # resp = K.feature.BlobHessian()
-    # resp = K.feature.CornerHarris(0.01)
     resp = Identity()
     scale_pyr = EMIScalePyramid(n_levels,
                                 init_radius=radius_start,
@@ -416,7 +441,10 @@ def dole_match(images,
                                 multiplicative=True,
                                 bins=n_bins,
                                 mode=mode)
+
+    # use non-maximum suppression to get the maxima
     nms = kornia.geometry.ConvQuadInterp3d()
+
     detector = MIScaleSpaceDetector(n_features,
                                     mr_size=mr_size,
                                     resp_module=resp,
@@ -434,9 +462,8 @@ def dole_match(images,
         B, N, CH, H, W = patches.size()
         # Descriptor accepts standard tensor [B, CH, H, W], while patches are [B, N, CH, H, W] shape
         descriptors = sift(patches.view(B * N, CH, H, W)).view(B, N, -1)
-        # scores, matches = K.feature.match_snn(descriptors[0], descriptors[1], 0.9)
-        # scores, matches = K.feature.match_mnn(descriptors[0], descriptors[1], 0.95)
         match_dists, match_idxs = kornia.feature.match_fginn(descriptors[0], descriptors[1], lafs[[0]], lafs[[1]], match_thresh_ratio, 10, mutual=True)
+    
     src_pts = lafs[1, match_idxs[:, 1], :, 2]
     dst_pts = lafs[0, match_idxs[:, 0], :, 2]
 
@@ -444,8 +471,9 @@ def dole_match(images,
     ransac = RANSAC(model_type=model_type, inl_th=match_thresh_sq_dist, batch_size=32768, max_iter=100,
                               confidence=0.99999, max_lo_iters=20)
     homography, mask = ransac(src_pts, dst_pts, match_dists)
+
     mask = mask.cpu()
     inliers = match_idxs[mask.bool().squeeze(), :]
 
-    return homography, inliers
+    return homography, (src_pts, dst_pts, mask, inliers, lafs)
 
